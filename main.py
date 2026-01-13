@@ -15,8 +15,14 @@ AUTH_CODES = {"25864mnb00", "20002000"}
 AUTH_FILE = "authorized.txt"
 CHANNELS_FILE = "saved_channels.json"
 
-STEAL_BATCH_SIZE = 50          # ⚡ السرقة فقط
-STATUS_UPDATE_EVERY = 5        # تحديث العداد
+STATUS_UPDATE_EVERY = 20  # تحديث العداد
+
+STEAL_SPEEDS = {
+    b"steal_slow": 50,
+    b"steal_medium": 100,
+    b"steal_fast": 150,
+    b"steal_max": 200
+}
 
 # ================= AUTH =================
 def load_authorized():
@@ -209,9 +215,23 @@ async def cb(event):
         await event.respond("⏱️ أرسل التأخير")
         return
 
-    if d == b"steal":
-        s.update({"mode": "steal", "step": "steal_link"})
-        await event.respond("🔗 أرسل رابط القناة")
+    if d == b"steal_speed":
+        await event.respond(
+            "⚡ اختر سرعة السرقة:",
+            buttons=[
+                [Button.inline("🐢 بطيئ (50)", b"steal_slow")],
+                [Button.inline("⚖️ متوسط (100)", b"steal_medium")],
+                [Button.inline("🚀 سريع جدًا (150)", b"steal_fast")],
+                [Button.inline("💀 السرعة الأبدية (200)", b"steal_max")]
+            ]
+        )
+        return
+
+    if d in STEAL_SPEEDS:
+        s["mode"] = "steal"
+        s["step"] = "steal_link"
+        s["steal_batch"] = STEAL_SPEEDS[d]
+        await event.respond(f"⚡ تم اختيار السرعة: {s['steal_batch']}\n🔗 أرسل رابط القناة")
         return
 
     if d == b"steal_protected":
@@ -229,7 +249,7 @@ async def show_main_menu(event):
         "اختر العملية:",
         buttons=[
             [Button.inline("📤 نقل", b"transfer_menu")],
-            [Button.inline("⚡ السرقة", b"steal")],
+            [Button.inline("⚡ السرقة", b"steal_speed")],
             [Button.inline("🔓 السرقة المحمية", b"steal_protected")]
         ]
     )
@@ -257,10 +277,10 @@ async def run(uid):
         if m.video:
             total += 1
 
-    sent = s.get("sent", 0)
+    sent = 0
     batch = []
 
-    async for m in c.iter_messages(src, offset_id=s.get("last_id", 0)):
+    async for m in c.iter_messages(src):
         if not s["running"]:
             break
         if not m.video:
@@ -268,7 +288,7 @@ async def run(uid):
 
         if s["mode"] == "steal":
             batch.append(m.video)
-            if len(batch) >= STEAL_BATCH_SIZE:
+            if len(batch) >= s.get("steal_batch", 50):
                 await c.send_file(dst, batch)
                 sent += len(batch)
                 batch.clear()
@@ -277,7 +297,6 @@ async def run(uid):
 
         await c.send_file(dst, m.video, caption=clean_caption(m.text))
         sent += 1
-        s["last_id"] = m.id
 
         if sent % STATUS_UPDATE_EVERY == 0 or sent == total:
             await s["status"].edit(f"🚀 جاري...\n📊 {sent} / {total}")
