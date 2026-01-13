@@ -15,6 +15,8 @@ AUTH_CODES = {"25864mnb00", "20002000"}
 AUTH_FILE = "authorized.txt"
 CHANNELS_FILE = "saved_channels.json"
 
+DEFAULT_DELAY = 10  # ⏱️ التأخير الافتراضي للنقل فقط
+
 # ================= AUTH =================
 def load_authorized():
     if os.path.exists(AUTH_FILE):
@@ -47,7 +49,7 @@ state = {}
 TEMP_SESSIONS = {}
 
 def clean_caption(txt):
-    return re.sub(r'@\w+|https?://\S+', '', txt or '')
+    return re.sub(r'(?:^|\s)@\w+|https?://\S+', '', txt or '')
 
 # ================= HELPERS =================
 async def get_accounts():
@@ -136,10 +138,9 @@ async def cb(event):
         await send_accounts_buttons(event)
         return
 
-    # ===== اختيار حساب (الإصلاح هنا فقط) =====
     if s.get("step") == "choose_account":
-        key = event.data.decode()          # ✅ الإصلاح
-        session_str = os.environ.get(key)  # ✅
+        key = event.data.decode()
+        session_str = os.environ.get(key)
         if not session_str:
             await event.respond("❌ Session غير موجود")
             return
@@ -152,12 +153,16 @@ async def cb(event):
 
     if data == b"transfer":
         s["mode"] = "transfer"
+        s["delay"] = DEFAULT_DELAY
         s["step"] = "delay"
-        await event.respond("⏱️ أرسل التأخير بالثواني")
+        await event.respond(
+            f"⏱️ أرسل التأخير بالثواني (الافتراضي {DEFAULT_DELAY})"
+        )
         return
 
     if data == b"steal":
         s["mode"] = "steal"
+        s["step"] = "steal_mode"
         await choose_steal_mode(event)
         return
 
@@ -172,7 +177,7 @@ async def cb(event):
         await event.respond("⏹️ تم الإيقاف")
         return
 
-# ================= TEMP LOGIN =================
+# ================= TEMP LOGIN + FLOW =================
 @bot.on(events.NewMessage)
 async def flow(event):
     uid = event.sender_id
@@ -180,7 +185,7 @@ async def flow(event):
     if not s:
         return
 
-    txt = event.text.strip()
+    txt = (event.text or "").strip()
 
     if s.get("step") == "temp_phone":
         c = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -219,7 +224,10 @@ async def flow(event):
         return
 
     if s.get("step") == "delay":
-        s["delay"] = int(txt)
+        if txt.isdigit():
+            s["delay"] = int(txt)
+        else:
+            s["delay"] = DEFAULT_DELAY
         s["step"] = "link"
         await event.respond("🔗 أرسل رابط القناة")
         return
@@ -277,7 +285,10 @@ async def run(uid):
             f"📊 {s['sent']} / {total}",
             buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
         )
-        await asyncio.sleep(s.get("delay", 10))
+
+        # ⏱️ التأخير فقط للنقل
+        if s["mode"] == "transfer":
+            await asyncio.sleep(s.get("delay", DEFAULT_DELAY))
 
     await s["status"].edit("✅ انتهت العملية")
 
