@@ -63,8 +63,11 @@ async def get_accounts():
 
 async def send_accounts_buttons(uid, event):
     accounts = await get_accounts()
-    buttons = [[Button.inline(f"📸 {name}", key)] for key, name in accounts]
-    buttons.append([Button.inline("🔄 تحديث الحسابات", "refresh_accounts")])
+    buttons = [
+        [Button.inline(f"📸 {name}", key.encode())]  # ✅ التعديل الوحيد هنا
+        for key, name in accounts
+    ]
+    buttons.append([Button.inline("🔄 تحديث الحسابات", b"refresh_accounts")])
     await event.respond("📋 اختر الحساب:", buttons=buttons)
 
 # ================= MAIN MENU =================
@@ -72,9 +75,9 @@ async def main_menu(event):
     await event.respond(
         "اهلا وسهلا في بوتي 🥺\nاختر طريقة الدخول 👇",
         buttons=[
-            [Button.inline("🛡 الحسابات المحمية (Session)", "protected_session")],
-            [Button.inline("📲 دخول مؤقت بالرقم", "temporary_login")],
-            [Button.inline("🧹 تسجيل خروج المؤقت", "clear_temp_sessions")]
+            [Button.inline("🛡 الحسابات المحمية (Session)", b"protected_session")],
+            [Button.inline("📲 دخول مؤقت بالرقم", b"temporary_login")],
+            [Button.inline("🧹 تسجيل خروج المؤقت", b"clear_temp_sessions")]
         ]
     )
 
@@ -119,7 +122,7 @@ async def cb(event):
     if not s:
         return
 
-    data = event.data.decode()
+    data = event.data.decode("utf-8")  # آمن
 
     if data == "protected_session":
         await send_accounts_buttons(uid, event)
@@ -156,7 +159,6 @@ async def flow_temp(event):
     if not s:
         return
 
-    # إرسال الرقم
     if s.get("step") == "temporary_login":
         phone = event.text.strip()
         client = TelegramClient(StringSession(), API_ID, API_HASH)
@@ -173,7 +175,6 @@ async def flow_temp(event):
         await event.respond("✅ تم إرسال كود التحقق 📩\n🔑 أرسل الكود:")
         return
 
-    # استقبال الكود
     if s.get("step") == "temporary_code":
         code = event.text.strip()
         try:
@@ -195,7 +196,6 @@ async def flow_temp(event):
         await choose_mode(event)
         return
 
-    # استقبال 2FA
     if s.get("step") == "temporary_2fa":
         password = event.text.strip()
         try:
