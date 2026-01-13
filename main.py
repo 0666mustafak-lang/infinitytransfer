@@ -4,6 +4,7 @@ import re
 import json
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError
 
 # ================= CONFIG =================
 API_ID = int(os.environ["API_ID"])
@@ -84,8 +85,8 @@ async def start(event):
     if uid not in AUTHORIZED_USERS:
         await event.respond("🔐 أرسل رمز الدخول")
         return
-    await main_menu(event)
     state[uid] = {"step": "main_menu"}
+    await main_menu(event)
 
 # ================= AUTH HANDLER =================
 @bot.on(events.NewMessage)
@@ -94,7 +95,6 @@ async def auth_only(event):
     txt = (event.text or "").strip()
 
     if uid not in AUTHORIZED_USERS:
-        # حذف رسالة الرمز
         try:
             await event.delete()
         except:
@@ -103,11 +103,11 @@ async def auth_only(event):
         if txt in AUTH_CODES:
             AUTHORIZED_USERS.add(uid)
             save_authorized(uid)
+            state[uid] = {"step": "main_menu"}
             await event.respond("✅ تم الدخول")
             await main_menu(event)
-            state[uid] = {"step": "main_menu"}
         else:
-            await event.respond("خطأ")
+            await event.respond("❌ رمز خاطئ")
         return
 
 # ================= CALLBACK =================
@@ -128,14 +128,14 @@ async def cb(event):
 
     if data == "temporary_login":
         s["step"] = "temporary_login"
-        await event.respond("📲 أرسل رقم الهاتف")
+        await event.respond("📲 أرسل رقم الهاتف مع المفتاح الدولي")
         return
 
     if data == "clear_temp_sessions":
         for cl in TEMP_SESSIONS.values():
             await cl.log_out()
         TEMP_SESSIONS.clear()
-        await event.respond("🧹 تم تسجيل الخروج")
+        await event.respond("🧹 تم تسجيل الخروج المؤقت")
         return
 
     if s.get("step") == "choose_account":
@@ -156,13 +156,58 @@ async def flow_temp(event):
     if not s:
         return
 
+    # إرسال الرقم
     if s.get("step") == "temporary_login":
         phone = event.text.strip()
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         TEMP_SESSIONS[uid] = client
-        await client.start(phone=phone)
+
+        await client.connect()
+        sent = await client.send_code_request(phone)
+
         s["client"] = client
+        s["phone"] = phone
+        s["phone_hash"] = sent.phone_code_hash
+        s["step"] = "temporary_code"
+
+        await event.respond("✅ تم إرسال كود التحقق 📩\n🔑 أرسل الكود:")
+        return
+
+    # استقبال الكود
+    if s.get("step") == "temporary_code":
+        code = event.text.strip()
+        try:
+            await s["client"].sign_in(
+                phone=s["phone"],
+                code=code,
+                phone_code_hash=s["phone_hash"]
+            )
+        except SessionPasswordNeededError:
+            s["step"] = "temporary_2fa"
+            await event.respond("🔐 الحساب محمي بمصادقة ثنائية\n✍️ أرسل كلمة مرور 2FA:")
+            return
+        except:
+            await event.respond("❌ الكود غير صحيح")
+            return
+
+        s["step"] = "logged"
+        await event.respond("✅ تم تسجيل الدخول بنجاح")
         await choose_mode(event)
+        return
+
+    # استقبال 2FA
+    if s.get("step") == "temporary_2fa":
+        password = event.text.strip()
+        try:
+            await s["client"].sign_in(password=password)
+        except:
+            await event.respond("❌ كلمة المرور غير صحيحة")
+            return
+
+        s["step"] = "logged"
+        await event.respond("✅ تم تسجيل الدخول بنجاح (2FA)")
+        await choose_mode(event)
+        return
 
 # ================= MENUS =================
 async def choose_mode(event):
