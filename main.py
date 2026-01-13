@@ -13,7 +13,6 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 AUTH_CODES = {"25864mnb00", "20002000"}
 AUTH_FILE = "authorized.txt"
-CHANNELS_FILE = "saved_channels.json"
 
 # ================= AUTH =================
 def load_authorized():
@@ -28,19 +27,6 @@ def save_authorized(uid):
 
 AUTHORIZED_USERS = load_authorized()
 
-# ================= CHANNELS =================
-def load_channels():
-    if os.path.exists(CHANNELS_FILE):
-        with open(CHANNELS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_channels(data):
-    with open(CHANNELS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-SAVED_CHANNELS = load_channels()
-
 # ================= BOT =================
 bot = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 state = {}
@@ -48,24 +34,6 @@ TEMP_SESSIONS = {}
 
 def clean_caption(txt):
     return re.sub(r'@\w+|https?://\S+', '', txt or '')
-
-# ================= HELPERS =================
-async def get_accounts():
-    accounts = []
-    for k, v in os.environ.items():
-        if k.startswith("TG_SESSION_"):
-            async with TelegramClient(StringSession(v), API_ID, API_HASH) as c:
-                me = await c.get_me()
-                name = f"{me.first_name} {me.last_name}" if me.last_name else me.first_name
-                accounts.append((k, name))
-    return sorted(accounts, key=lambda x: x[0])
-
-async def send_accounts(event):
-    buttons = [
-        [Button.inline(f"📸 {name}", key.encode())]
-        for key, name in await get_accounts()
-    ]
-    await event.respond("📋 اختر الحساب:", buttons=buttons)
 
 # ================= START =================
 @bot.on(events.NewMessage(pattern="/start"))
@@ -76,19 +44,53 @@ async def start(event):
         return
 
     state[uid] = {
-        "step": "choose_account",
+        "step": "choose_login",
         "delay": 10,
         "sent": 0,
         "running": False
     }
 
     await event.respond(
-        "اختر طريقة الدخول:",
+        "اهلا بك 👋\nاختر طريقة الدخول:",
         buttons=[
-            [Button.inline("🛡 Session", b"protected")],
+            [Button.inline("🛡 Session ثابتة", b"protected")],
             [Button.inline("📲 دخول مؤقت", b"temp")]
         ]
     )
+
+# ================= AUTH HANDLER =================
+@bot.on(events.NewMessage)
+async def auth_handler(event):
+    uid = event.sender_id
+    txt = (event.text or "").strip()
+
+    if uid in AUTHORIZED_USERS:
+        return
+
+    if txt in AUTH_CODES:
+        AUTHORIZED_USERS.add(uid)
+        save_authorized(uid)
+        await event.respond("✅ تم التحقق، أرسل /start")
+    else:
+        await event.respond("❌ رمز الدخول غير صحيح")
+
+# ================= HELPERS =================
+async def get_accounts():
+    accounts = []
+    for k, v in os.environ.items():
+        if k.startswith("TG_SESSION_"):
+            async with TelegramClient(StringSession(v), API_ID, API_HASH) as c:
+                me = await c.get_me()
+                name = me.first_name or "NoName"
+                accounts.append((k, name))
+    return accounts
+
+async def send_accounts(event):
+    buttons = [
+        [Button.inline(f"📸 {name}", key.encode())]
+        for key, name in await get_accounts()
+    ]
+    await event.respond("اختر الحساب:", buttons=buttons)
 
 # ================= CALLBACK =================
 @bot.on(events.CallbackQuery)
@@ -111,7 +113,7 @@ async def cb(event):
         await event.respond("📲 أرسل رقم الهاتف")
         return
 
-    if s["step"] == "choose_account":
+    if s.get("step") == "choose_account":
         sess = os.environ.get(data)
         if not sess:
             await event.respond("❌ Session غير موجود")
@@ -145,7 +147,7 @@ async def cb(event):
         await event.respond("⏹️ تم الإيقاف")
         return
 
-# ================= TEMP LOGIN =================
+# ================= TEMP LOGIN FLOW =================
 @bot.on(events.NewMessage)
 async def flow(event):
     uid = event.sender_id
