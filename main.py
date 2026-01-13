@@ -55,20 +55,22 @@ def clean_caption(txt):
 async def get_accounts():
     accs = []
     await asyncio.sleep(1.5)
-
     for k in sorted(os.environ.keys()):
-        if not k.startswith("TG_SESSION_"):
-            continue
-
-        try:
-            async with TelegramClient(StringSession(os.environ[k]), API_ID, API_HASH) as c:
-                me = await c.get_me()
-                name = me.first_name or me.username or "NoName"
-                accs.append((k, name))
-        except Exception:
-            continue
-
+        if k.startswith("TG_SESSION_"):
+            try:
+                async with TelegramClient(StringSession(os.environ[k]), API_ID, API_HASH) as c:
+                    me = await c.get_me()
+                    accs.append((k, me.first_name or me.username or "NoName"))
+            except Exception:
+                continue
     return accs
+
+async def count_videos(client, entity, min_id=0):
+    count = 0
+    async for m in client.iter_messages(entity, min_id=min_id):
+        if m.video:
+            count += 1
+    return count
 
 # ================= MESSAGE ROUTER =================
 @bot.on(events.NewMessage)
@@ -129,20 +131,20 @@ async def router(event):
     if step == "delay":
         s["delay"] = int(text) if text.isdigit() else 10
         s["step"] = "target"
-        await event.respond("🔗 أرسل الهدف")
+        await event.respond("🔗 أرسل رابط القناة / الكروب")
         return
 
     if step == "target":
         s["target"] = text
         s["running"] = True
-        s["status"] = await event.respond("🚀 بدء النقل...", buttons=[[Button.inline("⏹️ إيقاف", b"stop")]])
+        s["status"] = await event.respond("🚀 بدء النقل...")
         asyncio.create_task(run(uid))
         return
 
     if step == "steal_link":
         s["source"] = text
         s["running"] = True
-        s["status"] = await event.respond("⚡ بدء السرقة...", buttons=[[Button.inline("⏹️ إيقاف", b"stop")]])
+        s["status"] = await event.respond("⚡ بدء السرقة...")
         asyncio.create_task(run(uid))
         return
 
@@ -156,9 +158,6 @@ async def cb(event):
 
     if d == b"sessions":
         accs = await get_accounts()
-        if not accs:
-            await event.respond("❌ لا توجد حسابات")
-            return
         btns = [[Button.inline(n, k.encode())] for k, n in accs]
         await event.respond(f"🛡 الحسابات المتوفرة: {len(accs)}", buttons=btns)
         s["step"] = "choose_session"
@@ -193,8 +192,9 @@ async def cb(event):
         return
 
     if d == b"resume":
-        btns = [[Button.inline(c["title"], f"res_{i}".encode())] for i, c in enumerate(RECENT_CHANNELS)]
-        await event.respond("اختر قناة:", buttons=btns)
+        btns = [[Button.inline(f"{c['title']} ({c['sent']})", f"res_{i}".encode())]
+                for i, c in enumerate(RECENT_CHANNELS)]
+        await event.respond("اختر قناة للاستكمال:", buttons=btns)
         return
 
     if d.startswith(b"res_"):
@@ -202,7 +202,7 @@ async def cb(event):
         s.update(ch)
         s["mode"] = "transfer"
         s["running"] = True
-        s["status"] = await event.respond("▶️ استكمال...", buttons=[[Button.inline("⏹️ إيقاف", b"stop")]])
+        s["status"] = await event.respond("▶️ استكمال...")
         asyncio.create_task(run(uid))
         return
 
@@ -221,9 +221,6 @@ async def cb(event):
         s.update({"mode": "steal_protected", "step": "steal_link", "last_id": 0, "sent": 0})
         await event.respond("🔗 أرسل رابط القناة")
         return
-
-    if d == b"stop":
-        s["running"] = False
 
 # ================= MENUS =================
 async def show_main_menu(event):
@@ -258,6 +255,7 @@ async def run(uid):
         src = await c.get_entity(s["source"])
         dst = "me"
 
+    s["total"] = await count_videos(c, src, s.get("last_id", 0))
     batch = []
 
     async for m in c.iter_messages(src, min_id=s.get("last_id", 0)):
@@ -270,16 +268,17 @@ async def run(uid):
             batch.append(m.video)
             if len(batch) == 10:
                 await c.send_file(dst, batch)
-                s["sent"] += 10
-                await s["status"].edit(f"📊 {s['sent']}")
+                s["sent"] += len(batch)
+                await s["status"].edit(f"📊 {s['sent']} / {s['total']}")
                 batch.clear()
             continue
 
         await c.send_file(dst, m.video, caption=clean_caption(m.text))
         s["last_id"] = m.id
         s["sent"] += 1
-        await s["status"].edit(f"📊 {s['sent']}")
+        await s["status"].edit(f"📊 {s['sent']} / {s['total']}")
 
+        RECENT_CHANNELS[:] = [x for x in RECENT_CHANNELS if x["target"] != s["target"]]
         RECENT_CHANNELS.insert(0, {
             "title": dst.title,
             "target": s["target"],
@@ -288,12 +287,13 @@ async def run(uid):
         })
         del RECENT_CHANNELS[MAX_RECENT:]
         save_channels()
+
         await asyncio.sleep(s.get("delay", 10))
 
     if batch:
         await c.send_file(dst, batch)
         s["sent"] += len(batch)
-        await s["status"].edit(f"📊 {s['sent']}")
+        await s["status"].edit(f"📊 {s['sent']} / {s['total']}")
 
     await s["status"].edit("✅ انتهت العملية")
 
