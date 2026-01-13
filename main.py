@@ -44,6 +44,7 @@ MAX_RECENT = 7
 
 # ================= BOT =================
 bot = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
 state = {}
 TEMP_SESSIONS = {}
 
@@ -92,28 +93,40 @@ async def router(event):
 
     step = s.get("step")
 
-    # ===== TEMP LOGIN =====
+    # ===== TEMP LOGIN FLOW =====
     if step == "temp_phone":
         c = TelegramClient(StringSession(), API_ID, API_HASH)
         TEMP_SESSIONS[uid] = c
         await c.connect()
         sent = await c.send_code_request(text)
-        s.update({"client": c, "phone": text, "hash": sent.phone_code_hash, "step": "temp_code"})
+        s.update({
+            "client": c,
+            "phone": text,
+            "hash": sent.phone_code_hash,
+            "step": "temp_code"
+        })
         await event.respond("🔑 أرسل كود التحقق")
         return
 
     if step == "temp_code":
         try:
-            await s["client"].sign_in(phone=s["phone"], code=text, phone_code_hash=s["hash"])
+            await s["client"].sign_in(
+                phone=s["phone"],
+                code=text,
+                phone_code_hash=s["hash"]
+            )
         except SessionPasswordNeededError:
             s["step"] = "temp_2fa"
             await event.respond("🔐 أرسل رمز 2FA")
             return
+
+        s["step"] = "main"          # ✅ مهم جداً
         await show_main_menu(event)
         return
 
     if step == "temp_2fa":
         await s["client"].sign_in(password=text)
+        s["step"] = "main"          # ✅ مهم جداً
         await show_main_menu(event)
         return
 
@@ -127,7 +140,10 @@ async def router(event):
     if step == "target":
         s["target"] = text
         s["running"] = True
-        s["status"] = await event.respond("🚀 بدء النقل...", buttons=[[Button.inline("⏹️ إيقاف", b"stop")]])
+        s["status"] = await event.respond(
+            "🚀 بدء النقل...",
+            buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
+        )
         asyncio.create_task(run(uid))
         return
 
@@ -135,7 +151,10 @@ async def router(event):
     if step == "steal_link":
         s["source"] = text
         s["running"] = True
-        s["status"] = await event.respond("⚡ بدء السرقة...", buttons=[[Button.inline("⏹️ إيقاف", b"stop")]])
+        s["status"] = await event.respond(
+            "⚡ بدء السرقة...",
+            buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
+        )
         asyncio.create_task(run(uid))
         return
 
@@ -147,6 +166,7 @@ async def cb(event):
     s = state.setdefault(uid, {})
     d = event.data
 
+    # ===== SESSION LOGIN =====
     if d == b"sessions":
         accs = await get_accounts()
         btns = [[Button.inline(n, k.encode())] for k, n in accs]
@@ -155,11 +175,17 @@ async def cb(event):
         return
 
     if s.get("step") == "choose_session":
-        s["client"] = TelegramClient(StringSession(os.environ[d.decode()]), API_ID, API_HASH)
+        s["client"] = TelegramClient(
+            StringSession(os.environ[d.decode()]),
+            API_ID,
+            API_HASH
+        )
         await s["client"].start()
+        s["step"] = "main"          # ✅ هذا كان سبب الصَفَن
         await show_main_menu(event)
         return
 
+    # ===== TEMP =====
     if d == b"temp":
         s["step"] = "temp_phone"
         await event.respond("📲 أرسل رقم الهاتف")
@@ -169,7 +195,7 @@ async def cb(event):
         for c in TEMP_SESSIONS.values():
             await c.log_out()
         TEMP_SESSIONS.clear()
-        await event.respond("🧹 تم تسجيل خروج المؤقت")
+        await event.respond("🧹 تم تسجيل خروج الحسابات المؤقتة")
         return
 
     # ===== MAIN MENU =====
@@ -178,7 +204,12 @@ async def cb(event):
         return
 
     if d == b"new_transfer":
-        s.update({"mode": "transfer", "step": "delay", "last_id": 0, "sent": 0})
+        s.update({
+            "mode": "transfer",
+            "step": "delay",
+            "last_id": 0,
+            "sent": 0
+        })
         await event.respond("⏱️ أرسل التأخير (افتراضي 10)")
         return
 
@@ -186,8 +217,11 @@ async def cb(event):
         if not RECENT_CHANNELS:
             await event.respond("❌ لا توجد قنوات محفوظة")
             return
-        btns = [[Button.inline(f"{c['title']} ({c['sent']})", f"res_{i}".encode())] for i, c in enumerate(RECENT_CHANNELS)]
-        await event.respond("اختر قناة:", buttons=btns)
+        btns = [
+            [Button.inline(f"{c['title']} ({c['sent']})", f"res_{i}".encode())]
+            for i, c in enumerate(RECENT_CHANNELS)
+        ]
+        await event.respond("اختر قناة للاستكمال:", buttons=btns)
         return
 
     if d.startswith(b"res_"):
@@ -195,14 +229,17 @@ async def cb(event):
         s.update(ch)
         s["mode"] = "transfer"
         s["running"] = True
-        s["status"] = await event.respond("▶️ استكمال...", buttons=[[Button.inline("⏹️ إيقاف", b"stop")]])
+        s["status"] = await event.respond(
+            "▶️ استكمال...",
+            buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
+        )
         asyncio.create_task(run(uid))
         return
 
     if d == b"reset":
         RECENT_CHANNELS.clear()
         save_channels()
-        await event.respond("🗑️ تم مسح كل القنوات")
+        await event.respond("🗑️ تم مسح كل القنوات المحفوظة")
         return
 
     if d == b"steal":
@@ -217,6 +254,7 @@ async def cb(event):
 
     if d == b"stop":
         s["running"] = False
+        return
 
 # ================= MENUS =================
 async def show_main_menu(event):
