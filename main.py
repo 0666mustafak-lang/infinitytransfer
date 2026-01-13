@@ -15,7 +15,8 @@ AUTH_CODES = {"25864mnb00", "20002000"}
 AUTH_FILE = "authorized.txt"
 CHANNELS_FILE = "saved_channels.json"
 
-DEFAULT_DELAY = 10  # ⏱️ التأخير الافتراضي للنقل فقط
+DEFAULT_DELAY = 10          # ⏱️ للنقل فقط
+STEAL_BATCH_SIZE = 10       # ⚡ أقصى سرعة للسرقة
 
 # ================= AUTH =================
 def load_authorized():
@@ -65,10 +66,7 @@ async def get_accounts():
 
 async def send_accounts_buttons(event):
     accounts = await get_accounts()
-    buttons = [
-        [Button.inline(f"📸 {name}", key.encode())]
-        for key, name in accounts
-    ]
+    buttons = [[Button.inline(f"📸 {name}", key.encode())] for key, name in accounts]
     buttons.append([Button.inline("🔄 تحديث الحسابات", b"refresh_accounts")])
     await event.respond("📋 اختر الحساب:", buttons=buttons)
 
@@ -155,9 +153,7 @@ async def cb(event):
         s["mode"] = "transfer"
         s["delay"] = DEFAULT_DELAY
         s["step"] = "delay"
-        await event.respond(
-            f"⏱️ أرسل التأخير بالثواني (الافتراضي {DEFAULT_DELAY})"
-        )
+        await event.respond(f"⏱️ أرسل التأخير بالثواني (الافتراضي {DEFAULT_DELAY})")
         return
 
     if data == b"steal":
@@ -166,8 +162,16 @@ async def cb(event):
         await choose_steal_mode(event)
         return
 
-    if data in (b"fast", b"all", b"protected"):
-        s["send_mode"] = data.decode()
+    # 🚀 النقل الشامل
+    if data == b"steal_all":
+        s["send_mode"] = "all"
+        s["step"] = "link"
+        await event.respond("🔗 أرسل رابط القناة")
+        return
+
+    # 🔓 السرقة المحمية
+    if data == b"protected":
+        s["send_mode"] = "protected"
         s["step"] = "link"
         await event.respond("🔗 أرسل رابط القناة")
         return
@@ -224,10 +228,7 @@ async def flow(event):
         return
 
     if s.get("step") == "delay":
-        if txt.isdigit():
-            s["delay"] = int(txt)
-        else:
-            s["delay"] = DEFAULT_DELAY
+        s["delay"] = int(txt) if txt.isdigit() else DEFAULT_DELAY
         s["step"] = "link"
         await event.respond("🔗 أرسل رابط القناة")
         return
@@ -255,11 +256,10 @@ async def choose_mode(event):
 
 async def choose_steal_mode(event):
     await event.respond(
-        "اختر طريقة السرقة:",
+        "اختر نوع السرقة:",
         buttons=[
-            [Button.inline("⚡ fast", b"fast")],
-            [Button.inline("📦 all", b"all")],
-            [Button.inline("🔓 protected", b"protected")]
+            [Button.inline("🚀 النقل الشامل", b"steal_all")],
+            [Button.inline("🔓 السرقة المحمية", b"protected")]
         ]
     )
 
@@ -271,24 +271,36 @@ async def run(uid):
     src = await c.get_entity("me") if s["mode"] == "transfer" else await c.get_entity(s["link"])
     dst = await c.get_entity(s["link"]) if s["mode"] == "transfer" else await c.get_entity("me")
 
-    msgs = [m async for m in c.iter_messages(src) if m.video]
-    total = len(msgs)
+    batch = []
 
-    for m in msgs:
+    async for m in c.iter_messages(src):
         if not s["running"]:
             break
+        if not m.video:
+            continue
 
-        await c.send_file(dst, m.video, caption=clean_caption(m.text))
-        s["sent"] += 1
+        # ⚡ السرقة (أقصى سرعة)
+        if s["mode"] == "steal":
+            batch.append(m.video)
+            if len(batch) == STEAL_BATCH_SIZE:
+                await c.send_file(dst, batch)
+                s["sent"] += len(batch)
+                batch.clear()
+
+        # 📤 النقل (مع التأخير فقط هنا)
+        else:
+            await c.send_file(dst, m.video, caption=clean_caption(m.text))
+            s["sent"] += 1
+            await asyncio.sleep(s.get("delay", DEFAULT_DELAY))
 
         await s["status"].edit(
-            f"📊 {s['sent']} / {total}",
+            f"⚡ {s['sent']}",
             buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
         )
 
-        # ⏱️ التأخير فقط للنقل
-        if s["mode"] == "transfer":
-            await asyncio.sleep(s.get("delay", DEFAULT_DELAY))
+    if s["mode"] == "steal" and batch:
+        await c.send_file(dst, batch)
+        s["sent"] += len(batch)
 
     await s["status"].edit("✅ انتهت العملية")
 
