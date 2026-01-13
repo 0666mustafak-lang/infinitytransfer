@@ -14,8 +14,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 AUTH_CODES = {"25864mnb00", "20002000"}
 AUTH_FILE = "authorized.txt"
 CHANNELS_FILE = "saved_channels.json"
-
-STATUS_UPDATE_EVERY = 20  # تحديث العداد
+TRANSFER_FILE = "transfer_saved.json"
+STATUS_UPDATE_EVERY = 10
 
 STEAL_SPEEDS = {
     b"steal_slow": 50,
@@ -51,9 +51,22 @@ def save_channels():
 RECENT_CHANNELS = load_channels()
 MAX_RECENT = 7
 
+# ================= TRANSFER PROGRESS =================
+def load_transfer():
+    if os.path.exists(TRANSFER_FILE):
+        with open(TRANSFER_FILE) as f:
+            return json.load(f)
+    return {}
+
+def save_transfer():
+    with open(TRANSFER_FILE, "w") as f:
+        json.dump(TRANSFER_DATA, f, indent=2)
+
+TRANSFER_DATA = load_transfer()
+TEMP_PROGRESS = {}  # حفظ التقدم للحسابات المؤقتة
+
 # ================= BOT =================
 bot = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-
 state = {}
 TEMP_SESSIONS = {}
 
@@ -70,7 +83,7 @@ async def get_accounts():
                     me = await c.get_me()
                     accs.append((k, me.first_name))
             except:
-                continue
+                pass
     return accs
 
 # ================= MESSAGE ROUTER =================
@@ -80,6 +93,7 @@ async def router(event):
     text = (event.text or "").strip()
     s = state.setdefault(uid, {})
 
+    # ===== AUTH =====
     if uid not in AUTHORIZED_USERS:
         if text in AUTH_CODES:
             AUTHORIZED_USERS.add(uid)
@@ -89,6 +103,7 @@ async def router(event):
             await event.respond("🔐 أرسل رمز الدخول")
         return
 
+    # ===== START =====
     if text == "/start":
         s.clear()
         await event.respond(
@@ -103,6 +118,7 @@ async def router(event):
 
     step = s.get("step")
 
+    # ===== TEMP LOGIN FLOW =====
     if step == "temp_phone":
         c = TelegramClient(StringSession(), API_ID, API_HASH)
         TEMP_SESSIONS[uid] = c
@@ -139,27 +155,38 @@ async def router(event):
         await show_main_menu(event)
         return
 
-    if step == "delay":
-        s["delay"] = int(text) if text.isdigit() else 10
+    # ===== TRANSFER FLOW =====
+    if step == "source":
+        s["source"] = text
         s["step"] = "target"
-        await event.respond("🔗 أرسل رابط القناة / الكروب الهدف")
+        await event.respond("🔗 أرسل رابط القناة الهدف")
         return
 
     if step == "target":
         s["target"] = text
         s["running"] = True
+        key = f"{s.get('source')}->{s.get('target')}"
+        if s.get("client") in TEMP_SESSIONS.values():
+            last_id = TEMP_PROGRESS.get(key, {}).get("last_id", 0)
+            sent_count = TEMP_PROGRESS.get(key, {}).get("sent", 0)
+        else:
+            last_id = TRANSFER_DATA.get(key, {}).get("last_id", 0)
+            sent_count = TRANSFER_DATA.get(key, {}).get("sent", 0)
+        s["last_id"] = last_id
+        s["sent"] = sent_count
         s["status"] = await event.respond(
-            "🚀 بدء العملية...",
+            f"🚀 بدء النقل...\n📊 {s['sent']} / ؟",
             buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
         )
         asyncio.create_task(run(uid))
         return
 
+    # ===== STEAL LINK =====
     if step == "steal_link":
         s["source"] = text
         s["running"] = True
         s["status"] = await event.respond(
-            "⚡ بدء السرقة...",
+            f"⚡ بدء السرقة...\n📊 0 / ؟",
             buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
         )
         asyncio.create_task(run(uid))
@@ -173,6 +200,7 @@ async def cb(event):
     s = state.setdefault(uid, {})
     d = event.data
 
+    # ===== SESSION LOGIN =====
     if d == b"sessions":
         accs = await get_accounts()
         if not accs:
@@ -194,6 +222,7 @@ async def cb(event):
         await show_main_menu(event)
         return
 
+    # ===== TEMP =====
     if d == b"temp":
         s["step"] = "temp_phone"
         await event.respond("📲 أرسل رقم الهاتف")
@@ -203,16 +232,76 @@ async def cb(event):
         for c in TEMP_SESSIONS.values():
             await c.log_out()
         TEMP_SESSIONS.clear()
+        TEMP_PROGRESS.clear()
         await event.respond("🧹 تم تسجيل خروج الحسابات المؤقتة")
         return
 
+    # ===== MAIN MENU =====
     if d == b"transfer_menu":
         await show_transfer_menu(event)
         return
 
     if d == b"new_transfer":
-        s.update({"mode": "transfer", "step": "delay", "last_id": 0, "sent": 0})
-        await event.respond("⏱️ أرسل التأخير")
+        s.clear()
+        s["mode"] = "transfer"
+        s["step"] = "source"
+        await event.respond("🔗 أرسل رابط القناة المصدر")
+        return
+
+    if d == b"resume":
+        # دمج القنوات السيشن + المؤقت
+        btns = []
+        # القنوات المحفوظة من السيشن
+        for i, (key, v) in enumerate(TRANSFER_DATA.items()):
+            title = v["title"]
+            sent = v["sent"]
+            btns.append([Button.inline(f"{title} ({sent})", f"res_s_{i}".encode())])
+        # القنوات المؤقتة
+        for i, (key, v) in enumerate(TEMP_PROGRESS.items()):
+            title = key.split("->")[0]
+            sent = v["sent"]
+            btns.append([Button.inline(f"{title} (TEMP) ({sent})", f"res_t_{i}".encode())])
+        if not btns:
+            await event.respond("❌ لا توجد قنوات محفوظة")
+            return
+        await event.respond("اختر قناة للاستكمال:", buttons=btns)
+        return
+
+    if d.startswith(b"res_s_"):
+        idx = int(d.decode().split("_")[2])
+        key = list(TRANSFER_DATA.keys())[idx]
+        v = TRANSFER_DATA[key]
+        s.update({
+            "mode": "transfer",
+            "step": "source",
+            "source": v["source"],
+            "target": v["target"],
+            "last_id": v["last_id"],
+            "sent": v["sent"]
+        })
+        await event.respond("🔗 أرسل رابط القناة الهدف (يمكن ترك نفس القديمة)")
+        return
+
+    if d.startswith(b"res_t_"):
+        idx = int(d.decode().split("_")[2])
+        key = list(TEMP_PROGRESS.keys())[idx]
+        v = TEMP_PROGRESS[key]
+        s.update({
+            "mode": "transfer",
+            "step": "source",
+            "source": key.split("->")[0],
+            "target": key.split("->")[1],
+            "last_id": v["last_id"],
+            "sent": v["sent"]
+        })
+        await event.respond("🔗 أرسل رابط القناة الهدف (يمكن ترك نفس القديمة)")
+        return
+
+    if d == b"reset":
+        TRANSFER_DATA.clear()
+        TEMP_PROGRESS.clear()
+        save_transfer()
+        await event.respond("🗑️ تم مسح كل القنوات المحفوظة")
         return
 
     if d == b"steal_speed":
@@ -257,7 +346,11 @@ async def show_main_menu(event):
 async def show_transfer_menu(event):
     await event.respond(
         "قائمة النقل:",
-        buttons=[[Button.inline("📤 نقل جديد", b"new_transfer")]]
+        buttons=[
+            [Button.inline("📤 نقل جديد", b"new_transfer")],
+            [Button.inline("▶️ استكمال", b"resume")],
+            [Button.inline("🗑️ إعادة ضبط", b"reset")]
+        ]
     )
 
 # ================= RUN =================
@@ -266,7 +359,7 @@ async def run(uid):
     c = s["client"]
 
     if s["mode"] == "transfer":
-        src = await c.get_entity("me")
+        src = await c.get_entity(s["source"])
         dst = await c.get_entity(s["target"])
     else:
         src = await c.get_entity(s["source"])
@@ -277,10 +370,11 @@ async def run(uid):
         if m.video:
             total += 1
 
-    sent = 0
+    sent = s.get("sent", 0)
+    last_id = s.get("last_id", 0)
     batch = []
 
-    async for m in c.iter_messages(src):
+    async for m in c.iter_messages(src, offset_id=last_id):
         if not s["running"]:
             break
         if not m.video:
@@ -297,13 +391,29 @@ async def run(uid):
 
         await c.send_file(dst, m.video, caption=clean_caption(m.text))
         sent += 1
+        last_id = m.id
 
+        # حفظ التقدم
+        if s.get("client") in TEMP_SESSIONS.values():
+            key = f"{s['source']}->{s['target']}"
+            TEMP_PROGRESS[key] = {"last_id": last_id, "sent": sent}
+        else:
+            key = f"{s['source']}->{s['target']}"
+            TRANSFER_DATA[key] = {
+                "title": src.title,
+                "source": s["source"],
+                "target": s["target"],
+                "last_id": last_id,
+                "sent": sent
+            }
+            save_transfer()
+
+        # تحديث العداد
         if sent % STATUS_UPDATE_EVERY == 0 or sent == total:
-            await s["status"].edit(f"🚀 جاري...\n📊 {sent} / {total}")
+            await s["status"].edit(f"📊 {sent} / {total}", buttons=[[Button.inline("⏹️ إيقاف", b"stop")]])
 
         if s["mode"] == "transfer":
             await asyncio.sleep(s.get("delay", 10))
-
         if s["mode"] == "steal_protected":
             await asyncio.sleep(3)
 
