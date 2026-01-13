@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import json
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
@@ -13,15 +12,11 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 AUTH_CODES = {"25864mnb00", "20002000"}
 AUTH_FILE = "authorized.txt"
-CHANNELS_FILE = "saved_channels.json"
-
-DEFAULT_DELAY = 10          # ⏱️ للنقل فقط
-STEAL_BATCH_SIZE = 10       # ⚡ أقصى سرعة للسرقة
 
 # ================= AUTH =================
 def load_authorized():
     if os.path.exists(AUTH_FILE):
-        with open(AUTH_FILE, "r") as f:
+        with open(AUTH_FILE) as f:
             return set(map(int, f.read().splitlines()))
     return set()
 
@@ -31,44 +26,34 @@ def save_authorized(uid):
 
 AUTHORIZED_USERS = load_authorized()
 
-# ================= CHANNELS =================
-def load_channels():
-    if os.path.exists(CHANNELS_FILE):
-        with open(CHANNELS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-def save_channels(data):
-    with open(CHANNELS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-SAVED_CHANNELS = load_channels()
-
 # ================= BOT =================
 bot = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+
 state = {}
 TEMP_SESSIONS = {}
 
-def clean_caption(txt):
-    return re.sub(r'(?:^|\s)@\w+|https?://\S+', '', txt or '')
+# ================= MEMORY =================
+RECENT_CHANNELS = []   # آخر 7 قنوات
+MAX_RECENT = 7
 
 # ================= HELPERS =================
-async def get_accounts():
-    accounts = []
-    for key, value in os.environ.items():
-        if key.startswith("TG_SESSION_"):
-            async with TelegramClient(StringSession(value), API_ID, API_HASH) as c:
-                me = await c.get_me()
-                name = f"{me.first_name} {me.last_name}" if me.last_name else me.first_name
-                accounts.append((key, name))
-    accounts.sort(key=lambda x: x[0])
-    return accounts
+def clean_caption(txt):
+    return re.sub(r'@\w+|https?://\S+', '', txt or '')
 
-async def send_accounts_buttons(event):
-    accounts = await get_accounts()
-    buttons = [[Button.inline(f"📸 {name}", key.encode())] for key, name in accounts]
-    buttons.append([Button.inline("🔄 تحديث الحسابات", b"refresh_accounts")])
-    await event.respond("📋 اختر الحساب:", buttons=buttons)
+async def get_accounts():
+    res = []
+    for k, v in os.environ.items():
+        if k.startswith("TG_SESSION_"):
+            async with TelegramClient(StringSession(v), API_ID, API_HASH) as c:
+                me = await c.get_me()
+                res.append((k, me.first_name))
+    return res
+
+async def send_accounts(event):
+    accs = await get_accounts()
+    btns = [[Button.inline(f"📸 {n}", k.encode())] for k, n in accs]
+    btns.append([Button.inline("🔄 تحديث الحسابات", b"refresh_acc")])
+    await event.respond("اختر الحساب:", buttons=btns)
 
 # ================= START =================
 @bot.on(events.NewMessage(pattern="/start"))
@@ -78,26 +63,25 @@ async def start(event):
         await event.respond("🔐 أرسل رمز الدخول")
         return
 
-    state[uid] = {"step": "main"}
+    state[uid] = {}
     await event.respond(
-        "اهلا وسهلا 🥺\nاختر طريقة الدخول 👇",
+        "اختر:",
         buttons=[
-            [Button.inline("🛡 الحسابات المحمية (Session)", b"protected_session")],
-            [Button.inline("📲 دخول مؤقت بالرقم", b"temporary_login")],
-            [Button.inline("🧹 تسجيل خروج المؤقت", b"clear_temp_sessions")]
+            [Button.inline("🛡 Sessions", b"sessions")],
+            [Button.inline("📲 دخول مؤقت", b"temp_login")],
+            [Button.inline("▶️ استكمال", b"resume")],
+            [Button.inline("🗑️ إعادة ضبط", b"reset")],
+            [Button.inline("🧹 خروج المؤقت", b"clear_temp")]
         ]
     )
 
 # ================= AUTH HANDLER =================
 @bot.on(events.NewMessage)
-async def auth_handler(event):
+async def auth(event):
     uid = event.sender_id
-    txt = (event.text or "").strip()
-
     if uid in AUTHORIZED_USERS:
         return
-
-    if txt in AUTH_CODES:
+    if (event.text or "").strip() in AUTH_CODES:
         AUTHORIZED_USERS.add(uid)
         save_authorized(uid)
         await event.respond("✅ تم الدخول، أرسل /start")
@@ -113,75 +97,79 @@ async def cb(event):
     if not s:
         return
 
-    data = event.data
+    d = event.data
 
-    if data == b"protected_session":
-        s["step"] = "choose_account"
-        await send_accounts_buttons(event)
-        return
+    # ===== الحسابات =====
+    if d == b"sessions":
+        s["step"] = "choose_acc"
+        await send_accounts(event)
 
-    if data == b"temporary_login":
-        s["step"] = "temp_phone"
-        await event.respond("📲 أرسل رقم الهاتف مع المفتاح الدولي")
-        return
+    elif d == b"refresh_acc":
+        await send_accounts(event)
 
-    if data == b"clear_temp_sessions":
-        for cl in TEMP_SESSIONS.values():
-            await cl.log_out()
-        TEMP_SESSIONS.clear()
-        await event.respond("🧹 تم تسجيل خروج جميع الحسابات المؤقتة")
-        return
-
-    if data == b"refresh_accounts":
-        await send_accounts_buttons(event)
-        return
-
-    if s.get("step") == "choose_account":
-        key = event.data.decode()
-        session_str = os.environ.get(key)
-        if not session_str:
-            await event.respond("❌ Session غير موجود")
-            return
-
-        s["client"] = TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    elif s.get("step") == "choose_acc":
+        key = d.decode()
+        s["client"] = TelegramClient(StringSession(os.environ[key]), API_ID, API_HASH)
         await s["client"].start()
-        s["step"] = "mode"
         await choose_mode(event)
-        return
 
-    if data == b"transfer":
+    # ===== تسجيل مؤقت =====
+    elif d == b"temp_login":
+        s["step"] = "temp_phone"
+        await event.respond("📲 أرسل الرقم")
+
+    elif d == b"clear_temp":
+        for c in TEMP_SESSIONS.values():
+            await c.log_out()
+        TEMP_SESSIONS.clear()
+        await event.respond("🧹 تم الخروج")
+
+    # ===== العمليات =====
+    elif d == b"transfer":
         s["mode"] = "transfer"
-        s["delay"] = DEFAULT_DELAY
         s["step"] = "delay"
-        await event.respond(f"⏱️ أرسل التأخير بالثواني (الافتراضي {DEFAULT_DELAY})")
-        return
+        await event.respond("⏱️ التأخير (افتراضي 10)")
 
-    if data == b"steal":
-        s["mode"] = "steal"
-        s["step"] = "steal_mode"
-        await choose_steal_mode(event)
-        return
-
-    # 🚀 النقل الشامل
-    if data == b"steal_all":
-        s["send_mode"] = "all"
+    elif d == b"steal_fast":
+        s["mode"] = "steal_fast"
         s["step"] = "link"
-        await event.respond("🔗 أرسل رابط القناة")
-        return
+        await event.respond("🔗 رابط القناة")
 
-    # 🔓 السرقة المحمية
-    if data == b"protected":
-        s["send_mode"] = "protected"
+    elif d == b"steal_protected":
+        s["mode"] = "steal_protected"
         s["step"] = "link"
-        await event.respond("🔗 أرسل رابط القناة")
-        return
+        await event.respond("🔗 رابط القناة")
 
-    if data == b"stop":
+    # ===== الاستكمال =====
+    elif d == b"resume":
+        if not RECENT_CHANNELS:
+            await event.respond("❌ لا توجد قنوات محفوظة")
+            return
+        btns = []
+        for i, c in enumerate(RECENT_CHANNELS):
+            btns.append([Button.inline(f"{c['title']} ({c['sent']})", f"res_{i}".encode())])
+        await event.respond("اختر قناة:", buttons=btns)
+
+    elif d.startswith(b"res_"):
+        idx = int(d.decode().split("_")[1])
+        s.update(RECENT_CHANNELS[idx])
+        s["mode"] = "transfer"
+        s["running"] = True
+        s["status"] = await event.respond(
+            "🚀 استكمال...",
+            buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
+        )
+        asyncio.create_task(run(uid))
+
+    # ===== إعادة ضبط =====
+    elif d == b"reset":
+        RECENT_CHANNELS.clear()
+        await event.respond("🗑️ تم مسح كل القنوات")
+
+    elif d == b"stop":
         s["running"] = False
-        await event.respond("⏹️ تم الإيقاف")
-        return
 
-# ================= TEMP LOGIN + FLOW =================
+# ================= FLOW =================
 @bot.on(events.NewMessage)
 async def flow(event):
     uid = event.sender_id
@@ -196,70 +184,45 @@ async def flow(event):
         TEMP_SESSIONS[uid] = c
         await c.connect()
         sent = await c.send_code_request(txt)
-        s.update({
-            "client": c,
-            "phone": txt,
-            "hash": sent.phone_code_hash,
-            "step": "temp_code"
-        })
-        await event.respond("🔑 أرسل كود التحقق")
-        return
+        s.update({"client": c, "phone": txt, "hash": sent.phone_code_hash, "step": "temp_code"})
+        await event.respond("🔑 أرسل الكود")
 
-    if s.get("step") == "temp_code":
+    elif s.get("step") == "temp_code":
         try:
-            await s["client"].sign_in(
-                phone=s["phone"],
-                code=txt,
-                phone_code_hash=s["hash"]
-            )
+            await s["client"].sign_in(phone=s["phone"], code=txt, phone_code_hash=s["hash"])
         except SessionPasswordNeededError:
             s["step"] = "temp_2fa"
-            await event.respond("🔐 أرسل رمز 2FA")
+            await event.respond("🔐 كلمة المرور")
             return
-
-        s["step"] = "mode"
         await choose_mode(event)
-        return
 
-    if s.get("step") == "temp_2fa":
+    elif s.get("step") == "temp_2fa":
         await s["client"].sign_in(password=txt)
-        s["step"] = "mode"
         await choose_mode(event)
-        return
 
-    if s.get("step") == "delay":
-        s["delay"] = int(txt) if txt.isdigit() else DEFAULT_DELAY
+    elif s.get("step") == "delay":
+        s["delay"] = int(txt) if txt.isdigit() else 10
         s["step"] = "link"
-        await event.respond("🔗 أرسل رابط القناة")
-        return
+        await event.respond("🔗 رابط القناة")
 
-    if s.get("step") == "link":
+    elif s.get("step") == "link":
         s["link"] = txt
+        s.setdefault("sent", 0)
         s["running"] = True
-        s["sent"] = 0
         s["status"] = await event.respond(
-            "🚀 بدء العملية...",
+            "🚀 بدء...",
             buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
         )
         asyncio.create_task(run(uid))
-        return
 
 # ================= MENUS =================
 async def choose_mode(event):
     await event.respond(
-        "اختر العملية:",
+        "اختر:",
         buttons=[
-            [Button.inline("📤 نقل الفيديوهات", b"transfer")],
-            [Button.inline("🕵️‍♂️ سرقة", b"steal")]
-        ]
-    )
-
-async def choose_steal_mode(event):
-    await event.respond(
-        "اختر نوع السرقة:",
-        buttons=[
-            [Button.inline("🚀 النقل الشامل", b"steal_all")],
-            [Button.inline("🔓 السرقة المحمية", b"protected")]
+            [Button.inline("📤 نقل عادي", b"transfer")],
+            [Button.inline("⚡ النقل الشامل", b"steal_fast")],
+            [Button.inline("🔓 السرقة المحمية", b"steal_protected")]
         ]
     )
 
@@ -268,40 +231,34 @@ async def run(uid):
     s = state[uid]
     c = s["client"]
 
-    src = await c.get_entity("me") if s["mode"] == "transfer" else await c.get_entity(s["link"])
-    dst = await c.get_entity(s["link"]) if s["mode"] == "transfer" else await c.get_entity("me")
+    src = await c.get_entity(s["link"])
+    dst = await c.get_entity("me")
 
-    batch = []
-
-    async for m in c.iter_messages(src):
+    async for m in c.iter_messages(src, offset_id=s.get("last_id", 0)):
         if not s["running"]:
             break
         if not m.video:
             continue
 
-        # ⚡ السرقة (أقصى سرعة)
-        if s["mode"] == "steal":
-            batch.append(m.video)
-            if len(batch) == STEAL_BATCH_SIZE:
-                await c.send_file(dst, batch)
-                s["sent"] += len(batch)
-                batch.clear()
+        await c.send_file(dst, m.video, caption=clean_caption(m.text))
 
-        # 📤 النقل (مع التأخير فقط هنا)
-        else:
-            await c.send_file(dst, m.video, caption=clean_caption(m.text))
-            s["sent"] += 1
-            await asyncio.sleep(s.get("delay", DEFAULT_DELAY))
+        s["sent"] += 1
+        s["last_id"] = m.id
 
-        await s["status"].edit(
-            f"⚡ {s['sent']}",
-            buttons=[[Button.inline("⏹️ إيقاف", b"stop")]]
-        )
+        if s["mode"] == "transfer":
+            RECENT_CHANNELS[:] = [x for x in RECENT_CHANNELS if x["link"] != s["link"]]
+            RECENT_CHANNELS.insert(0, {
+                "title": src.title,
+                "link": s["link"],
+                "last_id": s["last_id"],
+                "sent": s["sent"]
+            })
+            del RECENT_CHANNELS[MAX_RECENT:]
+            await asyncio.sleep(s.get("delay", 10))
 
-    if s["mode"] == "steal" and batch:
-        await c.send_file(dst, batch)
-        s["sent"] += len(batch)
+        elif s["mode"] == "steal_protected":
+            await asyncio.sleep(3)
 
-    await s["status"].edit("✅ انتهت العملية")
+    await s["status"].edit("✅ انتهت")
 
 bot.run_until_disconnected()
